@@ -3,27 +3,14 @@ use starknet::ContractAddress;
 #[starknet::interface]
 trait IVendao<TContractState> {
     /// join is the entry point to vendao
-    fn join(ref self: TContractState);
-    /// set is responsible for setting the requirement for vendao
-    fn set(ref self: TContractState, acceptance_fee: u256);
+    fn join(ref self: TContractState, stable: ContractAddress);
+    /// set is use for setting the requirement for vendao
+    fn set(ref self: TContractState, _acceptance_fee: u256);
     /// function responsible for proposing a project to investors
-    ///
-    /// # Arguments
-    ///
-    /// * `url` - url to storage location of the project proposal overview
-    /// * `funding_req` - The amount requesting for funding in dollars
-    /// * `equity_offering` - amount of equity offering for that funding
-    /// * `contract_address` - contract address of the token (equity)
-    fn propose_project(ref self: TContractState, url: ByteArray, funding_req: u256, equity_offering: u256, contract_address: ContractAddress);
+    fn propose_project(ref self: TContractState, project_data: ProjectDataType, equity_address: ContractAddress);
 
     /// In a situation where the proposal is being rejected and told to change terms
-    /// # Arguments
-    ///
-    /// * `proposal_id` - proposal id
-    /// * `url` - url pointing to the storage location of the updated project proposal overview
-    /// * `funding_req` - modified amount requesting for funding in dollars
-    /// * `equity_offering` = amount of equity offering for that funding
-    fn repropose_project(ref self: TContractState, proposal_id: u32, url: ByteArray, funding_req: u256, equity_offering: u256);
+    fn repropose_project(ref self: TContractState, proposal_id: u32, project_data: ProjectDataType);
     /// This can only be called by the admin
     /// pause proposal is used to prevent excessive project proposal
     fn pause_proposal(ref self: TContractState);
@@ -50,4 +37,31 @@ trait IVendao<TContractState> {
     fn investor_details(self: @TContractState) -> felt252;
     fn proposal_time(self: @TContractState) -> u64;
     fn admin(self: @TContractState) -> ContractAddress;
+}
+
+/// ======== Custom Types =========
+#[derive(Drop, Serde)]
+struct ProjectDataType {
+    url: ByteArray, // url to storage location of the project proposal overview
+    funding_req: u256, // The amount requesting for funding in dollars
+    equity_offering: u256, // amount of equity offering for that funding
+    cliff_period: u64, // max of 1 year
+    vest_period: u64, // max of 8 years
+    allocation_count: u8,
+}
+
+#[derive(Drop, Serde, starknet::Store)]
+struct ProjectType {
+    url: ByteArray,
+    validity_period: u64,
+    proposal_creator: ContractAddress,
+    approval_count: u8,
+    status: u8, // 0 - Pending, 1 - Approved, 2 - Funded
+    funding_request: u256,
+    equity_offering: u256,
+    amount_funded: u256,
+    cliff_period: u64,
+    vest_period: u64,
+    allocation_count: u8,
+    equity_address: ContractAddress,
 }

@@ -21,6 +21,7 @@ mod Vendao {
         Proposed: Proposed,
         Gated: Gated,
         Stage: Stage,
+        Rejected: Rejected,
         #[flat]
         AccessControlEvent: AccessControlComponent::Event,
         #[flat]
@@ -56,6 +57,11 @@ mod Vendao {
         url: ByteArray,
     }
 
+    #[derive(Drop, starknet::Event)]
+    struct Rejected {
+        url: ByteArray,
+    }
+
     /// ========== Constants ==========
     const INVESTOR: felt252 = selector!("INVESTOR");
     const NOMINATED_ADMIN: felt252 = selector!("NOMINATED_ADMIN");
@@ -65,7 +71,7 @@ mod Vendao {
     const FUNDED: u8 = 2;
 
 
-    /// ========== Storage ========
+    /// ========== Storage ===========
     #[storage]
     struct Storage {
         acceptance_fee: u256,
@@ -74,10 +80,18 @@ mod Vendao {
         project_proposals: LegacyMap::<u32, ProjectType>,
         proposal_length: u32,
         approved: LegacyMap::<(ContractAddress, u32), bool>,
+        fund: LegacyMap::<(ContractAddress, u32), u256>,// fund
+        investor_details: LegacyMap::<ContractAddress, InvestorDetails>,
         #[substorage(v0)]
         accesscontrol: AccessControlComponent::Storage,
         #[substorage(v0)]
         src5: SRC5Component::Storage
+    }
+
+    #[derive(Drop, Serde, starknet::Store)]
+    struct InvestorDetails {
+        investment_count: u256,
+        amount_spent: u256,
     }
 
     #[constructor]
@@ -199,31 +213,29 @@ mod Vendao {
         fn examine_project(ref self: ContractState, proposal_id: u32) {
             let caller = get_caller_address();
             let timestamp = get_block_timestamp();
-            let has_role = self.accesscontrol.has_role(NOMINATED_ADMIN, caller);
-            assert!(has_role, "Not a nominated admin");
-            assert!(!self.approved.read((caller, proposal_id)), "Already Voted");
-            let mut _project = self.project_proposals.read(proposal_id);
+            self.accesscontrol.assert_only_role(NOMINATED_ADMIN);
+            assert!(!self.approved.read((caller, proposal_id)), "Already Voted"); // One vote per nominated admin
+
+            let _project = self.project_proposals.read(proposal_id);
             assert!(_project.status != APPROVED, "Project has already been approved");
 
             if(timestamp > _project.validity_period && _project.status == PENDING) {
                 IERC20(_project.equity_address).transfer(_project.proposal_creator, _project.equity_offering);
                 let len = self.proposal_length.read();
-                if(proposal_id == len - 1) {
-                    self.proposal_length.write(len - 1);
-                } else {
-                    assert!(proposal_id < len);
-                    // cache item
-                    let last_item = self.project_proposals.read(len - 1);
-                    let proposal_item = self.project_proposals.read(proposal_id);
-
-                    // swap items before poping
-                    self.project_proposals.write(len - 1, proposal_item);
-                    self.project_proposals.write(proposal_id, last_item);
-                    self.proposal_length.write(len - 1);
-                }
+                self.pop(len, proposal_id); // remove from virtual array and emit event
             } else {
-                let count: u8 = _project.approval_count;
+                let mut proposal = self.project_proposals.read(proposal_id);
+                proposal.approval_count += 1;
+                self.project_proposals.write(proposal_id, proposal);
+                let _calc: u256 = nominated_admins_incentive_calc(_project.funding_request);
+                let count = self.project_proposals.read(proposal_id).approval_count;
+                self.fund.write((caller, proposal_id), _calc);
+                if(count > 3) {
+                    let mut _proposal = self.project_proposals.read(proposal_id);
+                    _proposal.status = APPROVED;
+                    self.project_proposals.write(proposal_id, _proposal);
 
+                }
             }
         }
     }
@@ -233,6 +245,22 @@ mod Vendao {
         fn assert_only_vendao_admin(ref self: ContractState, caller: ContractAddress) {
             let _vendao_admin: felt252 = self.accesscontrol.get_role_admin(NOMINATED_ADMIN);
             assert!(contract_address_to_felt252(caller) == _vendao_admin, "VENDAO: Not an admin");
+        }
+
+        fn pop(ref self: ContractState, len: u32, proposal_id: u32) {
+            if(proposal_id == len - 1) {
+                self.proposal_length.write(len - 1);
+            } else {
+                assert!(proposal_id < len);
+                // cache item
+                let last_item = self.project_proposals.read(len - 1);
+                let proposal_item = self.project_proposals.read(proposal_id);
+
+                // swap items before poping
+                self.project_proposals.write(len - 1, proposal_item);
+                self.project_proposals.write(proposal_id, last_item);
+                self.proposal_length.write(len - 1);
+            }
         }
     }
 
@@ -247,6 +275,4 @@ mod Vendao {
         let incentive = (1 * funding_request) / 10000;
         incentive
     }
-
-
 }

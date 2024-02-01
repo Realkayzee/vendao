@@ -22,6 +22,8 @@ mod Vendao {
         Gated: Gated,
         Stage: Stage,
         Rejected: Rejected,
+        Approved: Approved,
+        Invested: Invested,
         #[flat]
         AccessControlEvent: AccessControlComponent::Event,
         #[flat]
@@ -62,10 +64,22 @@ mod Vendao {
         url: ByteArray,
     }
 
+    #[derive(Drop, starknet::Event)]
+    struct Approved {
+        url: ByteArray,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct Invested {
+        investor: ContractAddress,
+        amount: u256,
+    }
+
     /// ========== Constants ==========
     const INVESTOR: felt252 = selector!("INVESTOR");
     const NOMINATED_ADMIN: felt252 = selector!("NOMINATED_ADMIN");
-    const ONE_WEEK: u64 = 604800;
+    const ONE_WEEK: u64 = 604_800;
+    const ONE_YEAR: u64 = 31_536_000;
     const PENDING: u8 = 0;
     const APPROVED: u8 = 1;
     const FUNDED: u8 = 2;
@@ -82,6 +96,7 @@ mod Vendao {
         approved: LegacyMap::<(ContractAddress, u32), bool>,
         fund: LegacyMap::<(ContractAddress, u32), u256>,// fund
         investor_details: LegacyMap::<ContractAddress, InvestorDetails>,
+        currency: ContractAddress,
         #[substorage(v0)]
         accesscontrol: AccessControlComponent::Storage,
         #[substorage(v0)]
@@ -91,12 +106,13 @@ mod Vendao {
     #[derive(Drop, Serde, starknet::Store)]
     struct InvestorDetails {
         investment_count: u256,
-        amount_spent: u256,
+        total_amount_spent: u256,
     }
 
     #[constructor]
-    fn constructor(ref self: ContractState, _acceptance_fee: u256, vendao_admin: felt252) {
+    fn constructor(ref self: ContractState, _acceptance_fee: u256, vendao_admin: felt252, currency: ContractAddress) {
         self.acceptance_fee.write(_acceptance_fee);
+        self.currency.write(currency);
         self.accesscontrol.initializer();
         self.accesscontrol._set_role_admin(NOMINATED_ADMIN, vendao_admin);
     }
@@ -111,9 +127,10 @@ mod Vendao {
 
     #[abi(embed_v0)]
     impl VendaoImpl of IVendao<ContractState> {
-        fn join(ref self: ContractState, stable: ContractAddress) {
+        fn join(ref self: ContractState) {
             let caller = get_caller_address();
-            IERC20(stable).transfer_from(caller, get_contract_address(), self.acceptance_fee.read());
+            let currency = self.currency.read();
+            IERC20(currency).transfer_from(caller, get_contract_address(), self.acceptance_fee.read());
 
             self.accesscontrol._grant_role(INVESTOR, caller);
 
@@ -142,6 +159,7 @@ mod Vendao {
             let caller = get_caller_address();
             let timestamp = get_block_timestamp();
             let contract_addr = get_contract_address();
+            assert!(project_data.cliff_period <= ONE_YEAR && project_data.vest_period <= 8 * ONE_YEAR);
             assert!(
                 timestamp > self.proposal_time.read() && !self.gated.read(),
                 "VENDAO: Proposal Not Opened"
@@ -161,6 +179,8 @@ mod Vendao {
                 funding_request: project_data.funding_req,
                 equity_offering: project_data.equity_offering,
                 amount_funded: 0,
+                funded: false,
+                claimed: false,
                 cliff_period: project_data.cliff_period,
                 vest_period: project_data.vest_period,
                 allocation_count: project_data.allocation_count,
@@ -223,6 +243,10 @@ mod Vendao {
                 IERC20(_project.equity_address).transfer(_project.proposal_creator, _project.equity_offering);
                 let len = self.proposal_length.read();
                 self.pop(len, proposal_id); // remove from virtual array and emit event
+
+                self.emit(Event::Rejected(Rejected {
+                    url: _project.url,
+                }))
             } else {
                 let mut proposal = self.project_proposals.read(proposal_id);
                 proposal.approval_count += 1;
@@ -233,9 +257,54 @@ mod Vendao {
                 if(count > 3) {
                     let mut _proposal = self.project_proposals.read(proposal_id);
                     _proposal.status = APPROVED;
+                    _proposal.validity_period = timestamp + 4 * ONE_WEEK;
                     self.project_proposals.write(proposal_id, _proposal);
 
+                    self.emit(Event::Approved(Approved {
+                        url: self.project_proposals.read(proposal_id).url,
+                    }));
                 }
+            }
+        }
+
+        // Accessible to only Investors
+        fn invest(ref self: ContractState, amount: u256, proposal_id: u32) {
+            // variable caching
+            let caller = get_caller_address();
+            let address_this = get_contract_address();
+            let timestamp = get_block_timestamp();
+            let _project = self.project_proposals.read(proposal_id);
+
+            self.accesscontrol.assert_only_role(INVESTOR);
+            assert!(amount > 0);
+            if(timestamp > _project.validity_period) {
+                if(_project.amount_funded >= _project.funding_request) {
+                    let mut proposal = self.project_proposals.read(proposal_id);
+                    proposal.funded = true;
+                    self.project_proposals.write(proposal_id, proposal);
+                } else {
+                    IERC20(_project.equity_address).transfer(_project.proposal_creator, _project.equity_offering);
+                    let len = self.proposal_length.read();
+                    self.pop(len, proposal_id); // remove from virtual array and emit event
+
+                    self.emit(Event::Rejected(Rejected {
+                        url: _project.url,
+                    }))
+                }
+            } else {
+                let admin = self.accesscontrol.has_role(NOMINATED_ADMIN, caller);
+                let mut investor = self.investor_details.read(caller);
+                let investor_fund = self.fund.read((caller, proposal_id));
+                let admin_fee = nominated_admins_incentive_calc(_project.funding_request);
+
+                if((investor_fund == 0 && !admin) || (investor_fund == admin_fee && admin)) {
+                    investor.investment_count += 1
+                }
+                IERC20(self.currency.read()).transfer_from(caller, address_this, amount);
+                investor.total_amount_spent += amount;
+                self.investor_details.write(caller, investor);
+                let _value = self.fund.read((caller, proposal_id));
+                self.fund.write((caller, proposal_id), _value + amount);
             }
         }
     }

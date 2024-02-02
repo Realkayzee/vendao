@@ -1,7 +1,9 @@
 #[starknet::contract]
 mod Vendao {
     /// ========== Imports ========
-    use openzeppelin::access::accesscontrol::interface::IAccessControl;
+    use core::traits::Into;
+use core::starknet::event::EventEmitter;
+use openzeppelin::access::accesscontrol::interface::IAccessControl;
     use openzeppelin::access::accesscontrol::accesscontrol::AccessControlComponent::InternalTrait;
     use vendao::interfaces::IVendao::{IVendao, ProjectDataType, ProjectType };
     use vendao::interfaces::IERC20::{ IERC20Dispatcher, IERC20DispatcherTrait };
@@ -17,13 +19,12 @@ mod Vendao {
     #[derive(Drop, starknet::Event)]
     enum Event {
         JoinDao: JoinDao,
-        Set: Set,
-        Proposed: Proposed,
-        Gated: Gated,
         Stage: Stage,
         Rejected: Rejected,
         Approved: Approved,
+        Funded: Funded,
         Invested: Invested,
+
         #[flat]
         AccessControlEvent: AccessControlComponent::Event,
         #[flat]
@@ -36,26 +37,9 @@ mod Vendao {
     }
 
     #[derive(Drop, starknet::Event)]
-    struct Set {
-        new_fee: u256,
-    }
-
-    #[derive(Drop, starknet::Event)]
-    struct Proposed {
-        creator: ContractAddress,
-        funding_request: u256,
-        equity_offering: u256
-    }
-
-    #[derive(Drop, starknet::Event)]
-    struct Gated {
-        gated: bool
-    }
-
-    #[derive(Drop, starknet::Event)]
     struct Stage {
         status: u8,
-        proposal_creator: ContractAddress,
+        creator: ContractAddress,
         url: ByteArray,
     }
 
@@ -68,11 +52,20 @@ mod Vendao {
     struct Approved {
         url: ByteArray,
     }
+    #[derive(Drop, starknet::Event)]
+    struct Funded {
+        url: ByteArray,
+    }
 
     #[derive(Drop, starknet::Event)]
     struct Invested {
         investor: ContractAddress,
         amount: u256,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct Claimed {
+
     }
 
     /// ========== Constants ==========
@@ -83,6 +76,7 @@ mod Vendao {
     const PENDING: u8 = 0;
     const APPROVED: u8 = 1;
     const FUNDED: u8 = 2;
+    const FUNDING_UNSUCCESFUL: u8 = 3;
 
 
     /// ========== Storage ===========
@@ -97,6 +91,7 @@ mod Vendao {
         fund: LegacyMap::<(ContractAddress, u32), u256>,// fund
         investor_details: LegacyMap::<ContractAddress, InvestorDetails>,
         currency: ContractAddress,
+        claimed: LegacyMap::<(ContractAddress, u32), bool>,
         #[substorage(v0)]
         accesscontrol: AccessControlComponent::Storage,
         #[substorage(v0)]
@@ -142,24 +137,17 @@ mod Vendao {
         fn set(ref self: ContractState, _acceptance_fee: u256) {
             self.assert_only_vendao_admin(get_caller_address());
             self.acceptance_fee.write(_acceptance_fee);
-
-            self.emit(Event::Set(Set {
-                new_fee: _acceptance_fee,
-            }))
         }
 
         fn pause_proposal(ref self: ContractState) {
             self.assert_only_vendao_admin(get_caller_address());
             self.gated.write(true);
-
-            self.emit(Event::Gated(Gated {gated: true}));
         }
         // anybody can propose a project, but can be gated by the admin
         fn propose_project(ref self: ContractState, project_data: ProjectDataType, equity_address: ContractAddress) {
             let caller = get_caller_address();
             let timestamp = get_block_timestamp();
             let contract_addr = get_contract_address();
-            assert!(project_data.cliff_period <= ONE_YEAR && project_data.vest_period <= 8 * ONE_YEAR);
             assert!(
                 timestamp > self.proposal_time.read() && !self.gated.read(),
                 "VENDAO: Proposal Not Opened"
@@ -173,28 +161,17 @@ mod Vendao {
             let compute_proposals = ProjectType {
                 url: project_data.url,
                 validity_period: timestamp + 4 * ONE_WEEK, // 4 weeks validity before approving or funding
-                proposal_creator: caller,
+                creator: caller,
                 approval_count: 0,
                 status: 0,
                 funding_request: project_data.funding_req,
                 equity_offering: project_data.equity_offering,
                 amount_funded: 0,
-                funded: false,
-                claimed: false,
-                cliff_period: project_data.cliff_period,
-                vest_period: project_data.vest_period,
-                allocation_count: project_data.allocation_count,
                 equity_address
             };
             self.proposal_time.write(timestamp + ONE_WEEK); // 1 week per proposal
             self.project_proposals.write(len, compute_proposals);
             self.proposal_length.write(len + 1);
-
-            self.emit(Event::Proposed(Proposed {
-                creator: caller,
-                funding_request: project_data.funding_req,
-                equity_offering: project_data.equity_offering,
-            }));
         }
 
         fn repropose_project(ref self: ContractState, proposal_id: u32, project_data: ProjectDataType) {
@@ -202,11 +179,10 @@ mod Vendao {
             let timestamp = get_block_timestamp();
 
             let mut _project = self.project_proposals.read(proposal_id);
-
             assert!(
                 timestamp < _project.validity_period &&
                 _project.status == PENDING &&
-                _project.proposal_creator == caller,
+                _project.creator == caller,
                 "VENDAO: Invalid Reproposal"
             );
             let temp_equity_diff = project_data.equity_offering - _project.equity_offering; // Users can only offer higher equity
@@ -215,18 +191,9 @@ mod Vendao {
             _project.url = project_data.url;
             _project.funding_request = project_data.funding_req;
             _project.equity_offering = project_data.equity_offering;
-            _project.cliff_period = project_data.cliff_period;
-            _project.vest_period = project_data.vest_period;
-            _project.allocation_count = project_data.allocation_count;
             _project.validity_period = timestamp + 4 * ONE_WEEK;
 
             self.project_proposals.write(proposal_id, _project);
-
-            self.emit(Event::Proposed(Proposed {
-                creator: caller,
-                funding_request: project_data.funding_req,
-                equity_offering: project_data.equity_offering,
-            }));
         }
 
         // only accessible to nominated admins
@@ -240,7 +207,7 @@ mod Vendao {
             assert!(_project.status != APPROVED, "Project has already been approved");
 
             if(timestamp > _project.validity_period && _project.status == PENDING) {
-                IERC20(_project.equity_address).transfer(_project.proposal_creator, _project.equity_offering);
+                IERC20(_project.equity_address).transfer(_project.creator, _project.equity_offering);
                 let len = self.proposal_length.read();
                 self.pop(len, proposal_id); // remove from virtual array and emit event
 
@@ -258,7 +225,10 @@ mod Vendao {
                     let mut _proposal = self.project_proposals.read(proposal_id);
                     _proposal.status = APPROVED;
                     _proposal.validity_period = timestamp + 4 * ONE_WEEK;
+                    let admin_invested_amount = self.vendao_funding_calculation(_project.funding_request);
+                    _proposal.amount_funded = admin_invested_amount;
                     self.project_proposals.write(proposal_id, _proposal);
+                    self.fund.write((caller, proposal_id), admin_invested_amount);
 
                     self.emit(Event::Approved(Approved {
                         url: self.project_proposals.read(proposal_id).url,
@@ -275,21 +245,18 @@ mod Vendao {
             let timestamp = get_block_timestamp();
             let _project = self.project_proposals.read(proposal_id);
 
+            assert!(caller == _project.creator, "Creator Can't Invest");
+
             self.accesscontrol.assert_only_role(INVESTOR);
-            assert!(amount > 0);
             if(timestamp > _project.validity_period) {
                 if(_project.amount_funded >= _project.funding_request) {
                     let mut proposal = self.project_proposals.read(proposal_id);
-                    proposal.funded = true;
+                    proposal.status = FUNDED;
                     self.project_proposals.write(proposal_id, proposal);
                 } else {
-                    IERC20(_project.equity_address).transfer(_project.proposal_creator, _project.equity_offering);
-                    let len = self.proposal_length.read();
-                    self.pop(len, proposal_id); // remove from virtual array and emit event
-
-                    self.emit(Event::Rejected(Rejected {
-                        url: _project.url,
-                    }))
+                    let mut proposal = self.project_proposals.read(proposal_id);
+                    proposal.status = FUNDING_UNSUCCESFUL;
+                    self.project_proposals.write(proposal_id, proposal);
                 }
             } else {
                 let admin = self.accesscontrol.has_role(NOMINATED_ADMIN, caller);
@@ -301,19 +268,78 @@ mod Vendao {
                     investor.investment_count += 1
                 }
                 IERC20(self.currency.read()).transfer_from(caller, address_this, amount);
+                // update project proposal
+                let mut proposal = self.project_proposals.read(proposal_id);
+                proposal.amount_funded += amount;
+                self.project_proposals.write(proposal_id, proposal);
+                // update investor details
                 investor.total_amount_spent += amount;
                 self.investor_details.write(caller, investor);
                 let _value = self.fund.read((caller, proposal_id));
                 self.fund.write((caller, proposal_id), _value + amount);
+
+                self.emit(Event::Funded(Funded {
+                    url: _project.url,
+                }));
+            }
+        }
+
+        // claim is for investors to claim their share of the token based on vesting
+        // also for proposal creator to claim their raised funds
+        fn claim(ref self: ContractState, proposal_id: u32) {
+            let caller = get_caller_address();
+            let project = self.project_proposals.read(proposal_id);
+            let currency = self.currency.read();
+
+            if(project.status == FUNDED) {
+                if(caller == project.creator) {
+                    assert!(!self.claimed.read((caller, proposal_id)));
+                    IERC20(currency).transfer(project.creator, project.funding_request);
+                    self.claimed.write((caller, proposal_id), true);
+                } else {
+                    let amount_invested = self.fund.read((caller, proposal_id));
+                    let (share, unused_funds) = investor_claim_calc(
+                        project.funding_request,
+                        project.amount_funded,
+                        project.equity_offering,
+                        amount_invested,
+                    );
+                    self.fund.write((caller,proposal_id), 0);
+                    IERC20(project.equity_address).transfer(caller, share);
+                    IERC20(currency).transfer(caller, unused_funds);
+                }
+            } else if(project.status == FUNDING_UNSUCCESFUL) {
+                if(caller == project.creator) {
+                    assert!(!self.claimed.read((caller, proposal_id)));
+                    IERC20(project.equity_address).transfer(project.creator, project.funding_request);
+                    self.claimed.write((caller, proposal_id), true);
+                } else {
+                    let amount_invested = self.fund.read((caller, proposal_id));
+                    self.fund.write((caller, proposal_id), 0);
+                    IERC20(currency).transfer(caller, amount_invested);
+                }
             }
         }
     }
 
     #[generate_trait]
     impl VendaoInternalImpl of VendaoInternalTrait {
-        fn assert_only_vendao_admin(ref self: ContractState, caller: ContractAddress) {
+        fn assert_only_vendao_admin(self: @ContractState, caller: ContractAddress) {
             let _vendao_admin: felt252 = self.accesscontrol.get_role_admin(NOMINATED_ADMIN);
             assert!(contract_address_to_felt252(caller) == _vendao_admin, "VENDAO: Not an admin");
+        }
+
+        fn vendao_funding_calculation(self: @ContractState, funding_request: u256) -> u256 {
+            let amount: u256 = (10 * funding_request) / 100;
+            let address_this = get_contract_address();
+            let vendao_balance = IERC20(self.currency.read()).balance_of(address_this);
+
+            if(vendao_balance >= amount) {
+                amount
+            } else {
+                0
+            }
+
         }
 
         fn pop(ref self: ContractState, len: u32, proposal_id: u32) {
@@ -343,5 +369,22 @@ mod Vendao {
         // this serve as a motivation fee for nominated admins
         let incentive = (1 * funding_request) / 10000;
         incentive
+    }
+
+    // return share, amountused from the money you invest, and amount left
+    // Since the investment technique is an overflow method,
+    // the total amount invested may not be used for the equity purchase
+    // every body that invested will get their share of investment
+    // Not based on firt come first serve
+    fn investor_claim_calc(
+        funding_req: u256,
+        amount_raised: u256,
+        equity_offering: u256,
+        amount_invested: u256
+    ) -> (u256, u256) {
+        let share: u256 = (equity_offering * amount_invested) / amount_raised;
+        let amount_left: u256 = amount_invested - ((funding_req * amount_invested) / amount_raised);
+
+        (share, amount_left)
     }
 }

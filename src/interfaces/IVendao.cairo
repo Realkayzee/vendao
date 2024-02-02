@@ -22,21 +22,21 @@ trait IVendao<TContractState> {
     fn invest(ref self: TContractState, amount: u256, proposal_id: u32);
     /// project owner can claim successful funding
     /// or take back their offered equity for unsuccesful funding
-    // fn claim(ref self: TContractState, proposal_id: u32);
-    // /// swap equity can only be handled by the admin
-    // /// where admin swap some equity to stable tokens and native currency
-    // fn swap_equity(ref self: TContractState, equity: ContractAddress, token: ContractAddress, amount: u256);
+    fn claim(ref self: TContractState, proposal_id: u32);
+    /// swap equity can only be handled by the admin
+    /// where admin swap some equity to stable tokens and native currency
+    fn swap_equity(ref self: TContractState, equity: ContractAddress, token: ContractAddress, amount: u256);
 
-    // // ============= View Functions ============
-    // fn project_status(self: @TContractState) -> bool;
-    // fn token_balance(self: @TContractState) -> u256;
-    // fn get_length(self: @TContractState) -> u256;
-    // fn proposed_projects(self: @TContractState) -> Array<felt252>;
-    // fn proposals_to_invest(self: @TContractState) -> Array<felt252>;
-    // fn funded_project(self: @TContractState) -> Array<felt252>;
-    // fn investor_details(self: @TContractState) -> felt252;
-    // fn proposal_time(self: @TContractState) -> u64;
-    // fn admin(self: @TContractState) -> ContractAddress;
+    // ============= View Functions ============
+    fn project_status(self: @TContractState) -> bool;
+    fn balance(self: @TContractState) -> u256;
+    fn get_length(self: @TContractState) -> u256;
+    fn proposed_projects(self: @TContractState) -> Array<felt252>;
+    fn proposals_to_invest(self: @TContractState) -> Array<felt252>;
+    fn funded_project(self: @TContractState) -> Array<felt252>;
+    fn investor_details(self: @TContractState) -> felt252;
+    fn proposal_time(self: @TContractState) -> u64;
+    fn admin(self: @TContractState) -> ContractAddress;
 }
 
 /// ======== Custom Types =========
@@ -45,25 +45,17 @@ struct ProjectDataType {
     url: ByteArray, // url to storage location of the project proposal overview
     funding_req: u256, // The amount requesting for funding in dollars
     equity_offering: u256, // amount of equity offering for that funding
-    cliff_period: u64, // max of 1 year
-    vest_period: u64, // max of 8 years
-    allocation_count: u8,
 }
 
 #[derive(Drop, Serde, starknet::Store)]
 struct ProjectType {
     url: ByteArray,
     validity_period: u64,
-    proposal_creator: ContractAddress,
+    creator: ContractAddress,
     approval_count: u8,
-    status: u8, // 0 - Pending, 1 - Approved, 2 - Funded
+    status: u8, // 0 - Pending, 1 - Approved, 2 - Funded 3 - Funding Unsuccessful
     funding_request: u256,
     equity_offering: u256,
     amount_funded: u256,
-    funded: bool,
-    claimed: bool,
-    cliff_period: u64,
-    vest_period: u64,
-    allocation_count: u8,
     equity_address: ContractAddress,
 }

@@ -24,19 +24,24 @@ trait IVendao<TContractState> {
     /// or take back their offered equity for unsuccesful funding
     fn claim(ref self: TContractState, proposal_id: u32);
     /// swap equity can only be handled by the admin
-    /// where admin swap some equity to stable tokens and native currency
-    fn swap_equity(ref self: TContractState, equity: ContractAddress, token: ContractAddress, amount: u256);
+    /// where admin swap some equity to stable tokens / native currency
+    fn withdraw(ref self: TContractState, proposal_id: u32);
 
-    // ============= View Functions ============
-    fn project_status(self: @TContractState) -> bool;
+    fn deposit(ref self: TContractState, amount: u256);
+
+    // ============= View Functions ===============
+    fn project_status(self: @TContractState, proposal_id: u32) -> u8;
     fn balance(self: @TContractState) -> u256;
-    fn get_length(self: @TContractState) -> u256;
-    fn proposed_projects(self: @TContractState) -> Array<felt252>;
-    fn proposals_to_invest(self: @TContractState) -> Array<felt252>;
-    fn funded_project(self: @TContractState) -> Array<felt252>;
-    fn investor_details(self: @TContractState) -> felt252;
-    fn proposal_time(self: @TContractState) -> u64;
-    fn admin(self: @TContractState) -> ContractAddress;
+    fn get_length(self: @TContractState) -> u32;
+    fn proposed_projects(self: @TContractState) -> Array<ProjectType>;
+    fn investor_details(self: @TContractState, investor: ContractAddress) -> InvestorDetails;
+    fn vendao_admin(self: @TContractState) -> felt252;
+
+    // ============== Vendao Governance =============
+    fn set_contestant(ref self: TContractState, contestant: Array<Contestant>, vote_time: u64);
+    fn vote_admin(ref self: TContractState, contestant_id: u32);
+    fn contestant_len(self: @TContractState) -> u32;
+    fn nominees(self: @TContractState) -> Array<Contestant>;
 }
 
 /// ======== Custom Types =========
@@ -58,4 +63,17 @@ struct ProjectType {
     equity_offering: u256,
     amount_funded: u256,
     equity_address: ContractAddress,
+}
+
+#[derive(Drop, Serde, starknet::Store)]
+struct InvestorDetails {
+    investment_count: u256,
+    total_amount_spent: u256,
+}
+
+#[derive(Drop, Copy, Serde, starknet::Store)]
+struct Contestant {
+    address: ContractAddress,
+    vote_count: u128,
+    contestant_id: u32,
 }

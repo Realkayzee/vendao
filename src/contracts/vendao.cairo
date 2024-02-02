@@ -1,11 +1,10 @@
 #[starknet::contract]
 mod Vendao {
     /// ========== Imports ========
-    use core::traits::Into;
-use core::starknet::event::EventEmitter;
-use openzeppelin::access::accesscontrol::interface::IAccessControl;
+    use core::array::ArrayTrait;
+    use openzeppelin::access::accesscontrol::interface::IAccessControl;
     use openzeppelin::access::accesscontrol::accesscontrol::AccessControlComponent::InternalTrait;
-    use vendao::interfaces::IVendao::{IVendao, ProjectDataType, ProjectType };
+    use vendao::interfaces::IVendao::{IVendao, ProjectDataType, ProjectType, InvestorDetails, Contestant };
     use vendao::interfaces::IERC20::{ IERC20Dispatcher, IERC20DispatcherTrait };
     use starknet::{ ContractAddress, get_caller_address, get_contract_address, contract_address_to_felt252, get_block_timestamp };
     use openzeppelin::access::accesscontrol::AccessControlComponent;
@@ -24,7 +23,7 @@ use openzeppelin::access::accesscontrol::interface::IAccessControl;
         Approved: Approved,
         Funded: Funded,
         Invested: Invested,
-
+        Claimed: Claimed,
         #[flat]
         AccessControlEvent: AccessControlComponent::Event,
         #[flat]
@@ -65,7 +64,7 @@ use openzeppelin::access::accesscontrol::interface::IAccessControl;
 
     #[derive(Drop, starknet::Event)]
     struct Claimed {
-
+        claimer: ContractAddress,
     }
 
     /// ========== Constants ==========
@@ -92,17 +91,18 @@ use openzeppelin::access::accesscontrol::interface::IAccessControl;
         investor_details: LegacyMap::<ContractAddress, InvestorDetails>,
         currency: ContractAddress,
         claimed: LegacyMap::<(ContractAddress, u32), bool>,
+        contestant: LegacyMap::<u32, Contestant>,
+        contestant_length: u32,
+        vote_time: u64,
+        election_id: u32,
+        voted: LegacyMap::<(ContractAddress, u32),bool>,
         #[substorage(v0)]
         accesscontrol: AccessControlComponent::Storage,
         #[substorage(v0)]
         src5: SRC5Component::Storage
     }
 
-    #[derive(Drop, Serde, starknet::Store)]
-    struct InvestorDetails {
-        investment_count: u256,
-        total_amount_spent: u256,
-    }
+
 
     #[constructor]
     fn constructor(ref self: ContractState, _acceptance_fee: u256, vendao_admin: felt252, currency: ContractAddress) {
@@ -225,10 +225,10 @@ use openzeppelin::access::accesscontrol::interface::IAccessControl;
                     let mut _proposal = self.project_proposals.read(proposal_id);
                     _proposal.status = APPROVED;
                     _proposal.validity_period = timestamp + 4 * ONE_WEEK;
-                    let admin_invested_amount = self.vendao_funding_calculation(_project.funding_request);
-                    _proposal.amount_funded = admin_invested_amount;
+                    let vendao_invested_amount = self.vendao_funding_calculation(_project.funding_request);
+                    _proposal.amount_funded = vendao_invested_amount;
                     self.project_proposals.write(proposal_id, _proposal);
-                    self.fund.write((caller, proposal_id), admin_invested_amount);
+                    self.fund.write((get_contract_address(), proposal_id), vendao_invested_amount);
 
                     self.emit(Event::Approved(Approved {
                         url: self.project_proposals.read(proposal_id).url,
@@ -319,6 +319,111 @@ use openzeppelin::access::accesscontrol::interface::IAccessControl;
                     IERC20(currency).transfer(caller, amount_invested);
                 }
             }
+
+            self.emit(Event::Claimed(Claimed {
+                claimer: caller,
+            }))
+        }
+
+        fn withdraw(ref self: ContractState, proposal_id: u32) {
+            let caller = get_caller_address();
+            self.assert_only_vendao_admin(caller);
+            let address_this = get_contract_address();
+            let project = self.project_proposals.read(proposal_id);
+            let vendao_equity = self.fund.read((address_this, proposal_id));
+
+            self.assert_only_vendao_admin(caller);
+            assert!(project.status == FUNDED, "Status Not Funded");
+            self.fund.write((address_this, proposal_id), 0);
+            IERC20(project.equity_address).transfer(caller, vendao_equity);
+        }
+
+        fn deposit(ref self: ContractState, amount: u256) {
+            let caller = get_caller_address();
+            let address_this = get_contract_address();
+            IERC20(self.currency.read()).transfer_from(caller, address_this, amount);
+        }
+
+        /// =============== View Funstions =================
+        fn project_status(self: @ContractState, proposal_id: u32) -> u8 {
+            self.project_proposals.read(proposal_id).status
+        }
+
+        fn balance(self: @ContractState) -> u256 {
+            IERC20(self.currency.read()).balance_of(get_contract_address())
+        }
+
+        fn get_length(self: @ContractState) -> u32 {
+            self.proposal_length.read()
+        }
+
+        fn proposed_projects(self: @ContractState) -> Array<ProjectType> {
+            let len = self.get_length();
+            let mut i: u32 = 0;
+            let mut projects = ArrayTrait::<ProjectType>::new();
+
+            while(i < len) {
+                let item = self.project_proposals.read(i);
+                projects.append(item);
+
+                i += 1;
+            };
+
+            projects
+        }
+
+        fn investor_details(self: @ContractState, investor: ContractAddress) -> InvestorDetails {
+            self.investor_details.read(investor)
+        }
+
+        fn vendao_admin(self: @ContractState) -> felt252 {
+            let vendao_admin = self.accesscontrol.get_role_admin(NOMINATED_ADMIN);
+            vendao_admin
+        }
+
+        // ============== Vendao Governance =============
+        fn set_contestant(ref self: ContractState, contestant: Array<Contestant>, vote_time: u64) {
+            self.assert_only_vendao_admin(get_caller_address());
+            let contestant_len = contestant.len();
+            let mut i: u32 = 0;
+            while(i < contestant_len) {
+                self.contestant.write(i, *contestant.at(i));
+
+                i = i + 1;
+            };
+            self.vote_time.write(vote_time);
+            let election_id = self.election_id.read();
+            self.election_id.write(election_id + 1);
+        }
+
+        fn vote_admin(ref self: ContractState, contestant_id: u32) {
+            let caller = get_caller_address();
+            let election_id = self.election_id.read();
+            self.accesscontrol.assert_only_role(INVESTOR);
+            assert!(!self.voted.read((caller, election_id)), "Already Voted");
+            let mut contestant = self.contestant.read(contestant_id);
+            contestant.vote_count += 1;
+            self.contestant.write(contestant_id, contestant);
+            self.voted.write((caller, election_id), true);
+        }
+
+        fn contestant_len(self: @ContractState) -> u32 {
+            self.contestant_length.read()
+        }
+
+        fn nominees(self: @ContractState) -> Array<Contestant> {
+            let len = self.contestant_len();
+            let mut nominees = ArrayTrait::<Contestant>::new();
+            let mut i = 0;
+
+            while(i < len) {
+                let item = self.contestant.read(i);
+                nominees.append(item);
+
+                i += 1;
+            };
+
+            nominees
         }
     }
 
